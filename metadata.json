@@ -1,0 +1,5 @@
+{
+  "name": "Synthetic User Lab - Umetrip",
+  "description": "A UX testing tool that generates a synthetic user persona from real App Store reviews and uses multimodal AI to evaluate new UI designs based on that persona.",
+  "requestFramePermissions": []
+}
