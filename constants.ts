@@ -1,11 +1,29 @@
 import { AppData } from './types';
 
 export const RAW_DATA: AppData = {
-  "research_info": {
+  "app_info": {
     "name": "航旅纵横-民航官方直销平台",
-    "type": "mobile_app",
+    "id": 480161784,
+    "bundle_id": "com.travelsky.umetrip",
     "version": "8.3.4",
-    "description": "一款民航出行服务应用"
+    "price": 0.0
+  },
+  "scrape_info": {
+    "timestamp": "2025-11-23T22:13:42.339014",
+    "max_reviews": 200,
+    "actual_reviews": 200
+  },
+  "analysis": {
+    "total_reviews": 200,
+    "average_rating": 3.035,
+    "rating_distribution": {
+      "1_star": 88,
+      "2_star": 8,
+      "3_star": 5,
+      "4_star": 7,
+      "5_star": 92
+    },
+    "negative_reviews": 101
   },
   "reviews": [
     {

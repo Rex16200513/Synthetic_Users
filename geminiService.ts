@@ -86,10 +86,10 @@ const generateArchetypes = async (
  */
 const matchReviewsToArchetypes = async (
   reviews: { content: string, author: string, rating: number }[],
-  archetypes: { role: string, searchQuery: string }[],
-  matchCount: number = 5
+  archetypes: { role: string, searchQuery: string }[]
 ) => {
   // 1. Embed Archetype Queries
+  // We process them sequentially to ensure stability, though Promise.all is faster.
   const queryEmbeddings = await Promise.all(
     archetypes.map(async (arch) => {
       const res = await ai.models.embedContent({
@@ -100,10 +100,9 @@ const matchReviewsToArchetypes = async (
     })
   );
 
-  // 2. Embed Reviews 
-  // Increase pool size to ensure we find enough high-quality matches.
-  // We take a larger slice to find the best matches for the requested count.
-  const sampleReviews = reviews.filter(r => r.content.length > 5).slice(0, 300);
+  // 2. Embed Reviews (Batching or limiting to top 50 to save time/quota for demo)
+  // For a real app, we'd use a vector DB. Here we just take the first 50 valid reviews.
+  const sampleReviews = reviews.filter(r => r.content.length > 5).slice(0, 50);
   
   const reviewEmbeddings = await Promise.all(
     sampleReviews.map(async (r) => {
@@ -130,12 +129,11 @@ const matchReviewsToArchetypes = async (
       return { r, score: cosineSimilarity(qVec, rVec) };
     });
 
-    // Sort by score desc, take top 'matchCount'
-    // STRIP AUTHOR NAME to avoid hallucinating the same friend name ("Ma Xinjun") across different personas
+    // Sort by score desc, take top 3
     return scored
       .sort((a, b) => b.score - a.score)
-      .slice(0, matchCount)
-      .map(item => `[真实经历/Real Experience] (Rating: ${item.r.rating}/5): "${item.r.content}"`);
+      .slice(0, 3)
+      .map(item => `Review by ${item.r.author} (${item.r.rating}*): "${item.r.content}"`);
   });
 };
 
@@ -147,22 +145,24 @@ export const generatePersonasWithVectors = async (
   data: AppData,
   targetAppName: string,
   targetAppDesc: string,
-  personaConfigs: BigFiveConfig[],
-  matchCount: number = 5
+  personaConfigs: BigFiveConfig[]
 ): Promise<Persona[]> => {
   
   // A. Generate Archetypes
   const archetypes = await generateArchetypes(targetAppName, targetAppDesc, personaConfigs);
 
   // B. Vector Matching
-  const matchedReviewsList = await matchReviewsToArchetypes(data.reviews, archetypes, matchCount);
+  const matchedReviewsList = await matchReviewsToArchetypes(data.reviews, archetypes);
 
   // C. Construct Final Prompt
+  // We construct a specific prompt for EACH persona to ensure high quality, 
+  // or one big prompt. Let's do one big prompt to return the array, passing the specific context.
+
   const personaRequests = archetypes.map((arch: any, i: number) => `
     [User ${i + 1} Profile]
     - Big Five: ${formatBigFive(personaConfigs[i])}
     - Suggested Role: ${arch.role}
-    - Matched Memories (REAL EXPERIENCES):
+    - Matched Past Reviews (These are their actual past experiences):
       ${matchedReviewsList[i].join("\n      ")}
   `).join("\n\n");
 
@@ -172,22 +172,15 @@ export const generatePersonasWithVectors = async (
     Description: ${targetAppDesc}
 
     Task: Create 3 detailed synthetic user personas based on the profiles below. 
-    
-    [CRITICAL REQUIREMENT: INTEGRATING MEMORIES]
-    The "Matched Memories" provided for each user are their ACTUAL lived experiences or stories they heard from close friends.
-    When defining the 'bio' and 'systemInstruction':
-    1. Do NOT describe them as people who "read reviews".
-    2. Describe them as people who **experienced** these specific events (e.g., "Once got stranded in Dubai because of wrong gate info").
-    3. Their 'frustrations' must be specific and derived from these memories.
+    CRITICAL: You MUST incorporate the "Matched Past Reviews" into their bio and frustrations. 
+    These reviews are things they ACTUALLY experienced.
 
     ${personaRequests}
 
     Requirements:
-    1. **SystemInstruction**: Define their speaking style. 
-       - **IMPORTANT**: Add a strict rule that they must speak in FIRST PERSON about these memories (e.g., "I hate it when...", "My friend tried this and..."). 
-       - They must NEVER say "Based on the feedback" or "I analyzed the reviews". They must sound like a real, raw user.
-    2. **Bio**: A narrative incorporating the matched memories as their backstory.
-    3. **Age**: Assign a realistic age based on the role.
+    1. **SystemInstruction**: Define their speaking style (e.g., "Short, angry sentences" for low Agreeableness).
+    2. **Bio**: Incorporate the specific complaints/praises from their matched reviews.
+    3. **Frustrations**: Must be derived from the matched reviews.
 
     Return JSON matching the Schema.
   `;
@@ -207,14 +200,13 @@ export const generatePersonasWithVectors = async (
               properties: {
                 id: { type: Type.STRING },
                 name: { type: Type.STRING },
-                age: { type: Type.INTEGER },
                 role: { type: Type.STRING },
                 bio: { type: Type.STRING },
                 frustrations: { type: Type.ARRAY, items: { type: Type.STRING } },
                 goals: { type: Type.ARRAY, items: { type: Type.STRING } },
                 systemInstruction: { type: Type.STRING },
               },
-              required: ["id", "name", "age", "role", "bio", "frustrations", "goals", "systemInstruction"],
+              required: ["id", "name", "role", "bio", "frustrations", "goals", "systemInstruction"],
             }
           }
         }
@@ -230,12 +222,12 @@ export const generatePersonasWithVectors = async (
     color: colors[index % colors.length],
     reflections: [],
     bigFive: personaConfigs[index],
-    relevantReviews: matchedReviewsList[index] 
+    relevantReviews: matchedReviewsList[index] // Save the matched history
   }));
 };
 
 
-// --- AGENT 1: THE PERSONA (Speaks) ---
+// --- EXISTING CHAT LOGIC (Updated to return JSON metrics) ---
 
 export const evaluateDesignAsPersona = async (
   persona: Persona,
@@ -259,7 +251,7 @@ export const evaluateDesignAsPersona = async (
 
   // Inject the Vector-Matched History
   const vectorHistoryContext = persona.relevantReviews.length > 0
-    ? `\n[你的真实记忆库 (Personal Memories & Hearsay)]:\n${persona.relevantReviews.join('\n')}\n(重要指令：以上内容是你或者你朋友的**亲身经历**。在对话中引用时，请使用“我之前遇到过...”、“我有个朋友跟我说...”这样的表达。**绝对不要**说“我看过评论”、“根据用户反馈”等分析性话语。)`
+    ? `\n[你的过往真实经历 (来自历史评论)]:\n${persona.relevantReviews.join('\n')}\n(这些是你之前对该App的真实评价，它们定义了你的初始态度)`
     : "";
 
   const personalityContext = `
@@ -303,17 +295,14 @@ export const evaluateDesignAsPersona = async (
     3. group_consensus (C_group): 你是否在附和其他用户？(0=无, 1=明确附和)
     4. memory_resonance (I_pain): 这是否触碰到了你的[过往真实经历]？(1=无关, 5=完全命中历史痛点)
 
-    [Strict Speaking Rules]
-    1. **NO Analyst Language**: 禁止表现得像个研究员。禁止说“从反馈来看”、“综合用户意见”等。
-    2. **Own Your Past**: 必须把[你的真实记忆库]中的内容当作你自己的故事讲出来。
-       - Good: "我上次用这个App的时候气死了，因为..."
-       - Good: "哎对，我同事老王也跟我吐槽过这个问题..."
-       - Bad: "有用户指出..."
-    3. **Tone**: 完全沉浸在你的角色中，使用口语化表达。
-    4. **Diverse Names**: 如果你提到朋友或同事的经历，请使用自然的称呼（如“我老婆”、“同事老李”、“隔壁小张”、“我发小”），**绝对不要**使用重复的名字（如“马新军”）或奇怪的网名。
+    [决策逻辑]
+    1. **Retrieve**: 结合[过往真实经历]、[长期记忆]和[当前事件]。
+    2. **Personality**: 你的反应必须符合你的大五人格设定。
+    3. **Constructiveness**: **必须提出一个具体的修改建议**。
+    4. **Interaction**: 参考其他用户的发言。
 
-    [Output]
-    Return a valid JSON object. 请务必在 "thought" 字段中先思考，然后在 "text" 字段中输出回复。
+    [输出要求]
+    请返回一个合法的 JSON 对象。请务必在 "thought" 字段中先思考，然后在 "text" 字段中输出回复。
     JSON 格式如下:
     {
       "thought": "简短的思考过程...",
@@ -388,98 +377,6 @@ export const evaluateDesignAsPersona = async (
   };
 };
 
-// ... (Rest of Clerk and Reflection functions remain same)
-
-export const analyzeResponseImpact = async (
-    persona: Persona,
-    userMessage: string,
-    personaResponse: string,
-    chatHistory: ChatMessage[]
-): Promise<ImpactMetrics> => {
-
-    const lastFewMessages = chatHistory.slice(-5).map(m => `${m.role === 'user' ? 'Designer' : 'Other User'}: ${m.text}`).join('\n');
-
-    const prompt = `
-    You are "The Clerk", an objective, independent judge in a UX Focus Group.
-    Your job is to listen to the user's response and calculate the Impact Score scientifically.
-    Do NOT just trust what the user says. Validate it against their Profile and History.
-
-    [The Subject]
-    - Name: ${persona.name}
-    - Role: ${persona.role}
-    - Matched Real History (Vector DB): ${persona.relevantReviews.join(' | ')}
-    
-    [Context]
-    - Recent Chat: \n${lastFewMessages}
-    - Designer Input: "${userMessage}"
-    
-    [The Subject's Response]
-    "${personaResponse}"
-
-    [Task: Calculate Metrics]
-    Analyze the Response above using this formula:
-    Impact = E_mo * S_persona * (1 + C_group) * I_pain
-
-    1. **emotional_intensity (E_mo)**: 1-5. How intense is the language? (1=Neutral, 5=Extreme).
-    2. **role_fit (S_persona)**: 0.5 - 1.5. Does this specific issue matter to a "${persona.role}"?
-    3. **group_consensus (C_group)**: 0 or 1. Did they repeat/agree with a previous user?
-    4. **memory_resonance (I_pain)**: 1-5.
-       - CRITICAL CHECK: Look at [Matched Real History].
-       - Does the current complaint DIRECTLY match a topic in their history?
-       - If YES -> 5 (High Resonance).
-       - If NO -> 1 (New topic).
-
-    Return JSON only.
-    `;
-
-    const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    emotional_intensity: { type: Type.INTEGER },
-                    role_fit: { type: Type.NUMBER },
-                    group_consensus: { type: Type.INTEGER },
-                    memory_resonance: { type: Type.INTEGER }
-                },
-                required: ["emotional_intensity", "role_fit", "group_consensus", "memory_resonance"]
-            }
-        }
-    });
-
-    let metrics = {
-        emotional_intensity: 1,
-        role_fit: 1.0,
-        group_consensus: 0,
-        memory_resonance: 1
-    };
-
-    try {
-        metrics = JSON.parse(response.text || "{}");
-    } catch (e) {
-        console.error("Clerk failed to score", e);
-    }
-
-    // Calculate total
-    const total = (
-        (metrics.emotional_intensity || 1) * 
-        (metrics.role_fit || 1) * 
-        (1 + (metrics.group_consensus || 0)) * 
-        (metrics.memory_resonance || 1)
-    ).toFixed(1);
-
-    return {
-        emotional_intensity: metrics.emotional_intensity || 1,
-        role_fit: metrics.role_fit || 1,
-        group_consensus: metrics.group_consensus || 0,
-        memory_resonance: metrics.memory_resonance || 1,
-        total_impact: parseFloat(total)
-    };
-}
-
 export const generatePersonaReflection = async (
     persona: Persona, 
     chatHistory: ChatMessage[]
@@ -513,5 +410,5 @@ export const generatePersonaReflection = async (
     return (response.text || "").trim();
 };
 
-// Re-export old function just in case
+// Re-export old function just in case, but unused in new flow
 export const generatePersonasFromReviews = generatePersonasWithVectors;
